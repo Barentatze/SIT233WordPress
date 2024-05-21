@@ -1,0 +1,256 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Template to create EC2, RDS, ALB, and S3 resources
+
+Parameters:
+  VPCId:
+    Type: AWS::EC2::VPC::Id
+    Description: Select the VPC Id
+  PublicSubnet1Id:
+    Type: AWS::EC2::Subnet::Id
+    Description: Select the first public subnet
+  PublicSubnet2Id:
+    Type: AWS::EC2::Subnet::Id
+    Description: Select the second public subnet
+  PrivateSubnet1Id:
+    Type: AWS::EC2::Subnet::Id
+    Description: Select the first private subnet
+  PrivateSubnet2Id:
+    Type: AWS::EC2::Subnet::Id
+    Description: Select the second private subnet
+
+Resources:
+  # Create the RDS SG
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for RDS
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: RDSSG
+  
+  # Create RDS Subnet Group
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for RDS
+      SubnetIds:
+        - !Ref PublicSubnet1Id
+        - !Ref PublicSubnet2Id
+        - !Ref PrivateSubnet1Id
+        - !Ref PrivateSubnet2Id
+
+  # Create RDS Instance
+  MyRDSInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName: wordpress
+      DBInstanceClass: db.t3.micro
+      Engine: MySQL
+      MasterUsername: admin
+      MasterUserPassword: chenjifeng2002
+      AllocatedStorage: 20
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      MultiAZ: true
+      PubliclyAccessible: false
+      StorageType: gp2
+      BackupRetentionPeriod: 7
+      Tags:
+        - Key: Name
+          Value: MyRDSInstance
+
+  # Create RDS Read Replica
+  MyRDSReadReplica:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      SourceDBInstanceIdentifier: !Ref MyRDSInstance
+      DBInstanceClass: db.t3.micro
+      Engine: MySQL
+      PubliclyAccessible: false
+      AvailabilityZone: us-east-1b
+      Tags:
+        - Key: Name
+          Value: MyRDSReadReplica
+
+  # Create ALB Security Group
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for ALB
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: ALBSG
+
+  # Create ALB
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: MyALB
+      Subnets:
+        - !Ref PublicSubnet1Id
+        - !Ref PublicSubnet2Id
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+        - Key: deletion_protection.enabled
+          Value: false
+        - Key: idle_timeout.timeout_seconds
+          Value: 60
+
+  # Create ALB Target Group
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: MyTargetGroup
+      VpcId: !Ref VPCId
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      HealthCheckIntervalSeconds: 60
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: traffic-port
+      HealthCheckTimeoutSeconds: 15
+      HealthyThresholdCount: 5
+      UnhealthyThresholdCount: 2
+
+  # Create HTTP Listener and forward to target group
+  HTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+#  # Create S3 Bucket，and disable public access
+#  MyS3Bucket:
+#    Type: AWS::S3::Bucket
+#    Properties:
+#      BucketName: my-private-s3-bucket-79123123
+#      PublicAccessBlockConfiguration:
+#        BlockPublicAcls: true
+#        BlockPublicPolicy: true
+#        IgnorePublicAcls: true
+#        RestrictPublicBuckets: true
+  
+  # Security Group for EC2
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for EC2 instances
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: EC2SG
+
+  
+
+  
+  # Create a launch template
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: ami-04ff98ccbfa41c9ad # Amazon Linux 2 AMI (HVM), SSD
+        InstanceType: t2.micro
+        KeyName: vockey
+        SecurityGroupIds:
+          - !Ref EC2SecurityGroup
+        UserData:
+            Fn::Base64:
+                !Sub |
+                    #!/bin/bash
+                    yum -y update
+                    yum -y install php httpd mysql
+                    amazon-linux-extras install php7.4 -y
+                    yum -y install php-mbstring php-xml
+                    wget http://wordpress.org/latest.tar.gz -P /tmp/
+                    tar zxvf /tmp/latest.tar.gz -C /tmp
+                    cp -r /tmp/wordpress/* /var/www/html/
+                    chown apache:apache -R /var/www/html
+                    systemctl enable httpd.service
+                    systemctl start httpd.service
+                    
+                    echo "<?php
+                    define('DB_NAME', 'wordpress');
+                    define('DB_USER', 'admin');
+                    define('DB_PASSWORD', 'chenjifeng2002');
+                    define('DB_HOST',   '${MyRDSInstance.Endpoint.Address}');
+                    define('DB_CHARSET', 'utf8');
+                    define('DB_COLLATE', '');
+                    ?>" > /var/www/html/wp-config.php
+          
+      LaunchTemplateName: MyLaunchTemplate
+  
+  # Create Auto Scaling Group
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref PublicSubnet1Id
+        - !Ref PublicSubnet2Id
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: 1
+      MinSize: 1
+      MaxSize: 3
+      DesiredCapacity: 1
+      TargetGroupARNs:
+        - !Ref TargetGroup
+  
+  # Create ScalePolicy
+  ScalePolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 50.0
+
+Outputs:
+  RDSSecurityGroupId:
+    Description: The ID of the RDS security group
+    Value: !Ref RDSSecurityGroup
+  RDSInstanceId:
+    Description: The ID of the RDS instance
+    Value: !Ref MyRDSInstance
+  RDSReadReplicaId:
+    Description: The ID of the RDS read replica
+    Value: !Ref MyRDSReadReplica
+  ALBName:
+    Description: The name of the application load balancer
+    Value: !Ref ApplicationLoadBalancer
+  ALBListenerArn:
+    Description: The ARN of the HTTP listener
+    Value: !Ref HTTPListener
+#  S3BucketName:
+#    Description: The name of the S3 bucket
+#    Value: !Ref MyS3Bucket
+
